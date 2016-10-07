@@ -1,0 +1,9 @@
+[package]
+name = "bind_socket"
+version = "0.1.0"
+authors = ["snap <snap@localhost>"]
+
+[dependencies]
+mio = "0.6"
+flate2 = "0.2"
+
