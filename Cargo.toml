@@ -1,9 +1,18 @@
 [package]
-name = "bind_socket"
+name = "rustyshell"
 version = "0.1.0"
-authors = ["snap <snap@localhost>"]
+authors = ["snap"]
+
+[[bin]]
+name = "server"
+path = "src/server/bin/main.rs"
+
+[[bin]]
+name = "client"
+path = "src/client/bin/main.rs"
 
 [dependencies]
 mio = "0.6"
-flate2 = "0.2"
-
+flate2 = "1.0"
+rustyline = "3.0.0"
+getopts = "0.2"

