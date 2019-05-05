@@ -14,7 +14,7 @@ use rustyline::config::Builder;
 use rustyline::Editor;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use flate2::read::ZlibDecoder;
+use flate2::bufread::ZlibDecoder;
 use getopts::Options;
 
 const SERVER_TOKEN: Token = Token(0);
@@ -43,6 +43,16 @@ fn parse_ip_address(stream: &TcpStream) -> String {
     cmd_prompt_string
 }
 
+fn compress_buffer(command_string: &String) -> Vec<u8> {
+    let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
+    let _compressed_bytes_len = e.write_all(command_string.as_bytes()).unwrap();
+    let compressed_bytes = e.finish().unwrap();
+    println!("Compressed len: {}", compressed_bytes.len());
+    println!("Orig len: {}", command_string.len());
+
+    compressed_bytes
+}
+
 fn command_loop (mut stream: &TcpStream, poll: &Poll, mut pevents: &mut Events) {
     let rustyline_config_builder = Builder::new().max_history_size(1024).auto_add_history(true);
     let rustyline_config = rustyline_config_builder.build();
@@ -61,13 +71,9 @@ fn command_loop (mut stream: &TcpStream, poll: &Poll, mut pevents: &mut Events) 
             Ok(mut line) => {
                 line.push_str("\n");
 
-                let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
-                let _compressed_bytes_len = e.write(line.as_bytes()).unwrap();
-                let _compressed_bytes = e.finish().unwrap();
-                //println!("Compressed len: {}", compressed_bytes.len());
-                //println!("Orig len: {}", line.len());
-
-                let _ = stream.write(line.as_bytes());
+                let command_to_send = compress_buffer(&line);
+                println!("Command to send: {:?}", command_to_send);
+                let _ = stream.write(&command_to_send);
                 if line.trim() == "quit" || line.trim() == "kill" {
                     println!("[+] Exiting....");
                     break;
@@ -76,7 +82,6 @@ fn command_loop (mut stream: &TcpStream, poll: &Poll, mut pevents: &mut Events) 
                     continue;
                 }
 
-                println!("Sending: {}", line);
                 poll.poll(&mut pevents, None).unwrap();
                 loop {
                     let mut buf = [0; 4096];
@@ -91,17 +96,15 @@ fn command_loop (mut stream: &TcpStream, poll: &Poll, mut pevents: &mut Events) 
                         }
                     };
 
-                    let mut print_buf : Vec<u8> = buf.iter().cloned().collect();
-                    print_buf.truncate(recv);
-                    let str_buf_clone = print_buf.clone();
-                    let str_as_bytes = &str_buf_clone[..];
+                    let mut str_buf_clone = buf.to_vec();
+                    str_buf_clone.truncate(recv);
 
-                    let mut d = ZlibDecoder::new(str_as_bytes);
+                    let mut d = ZlibDecoder::new(str_buf_clone.as_slice());
                     let mut s = String::new();
                     d.read_to_string(&mut s).unwrap();
                     
                     let str_len = s.len() as f32;
-                    println!("Results ({:.2}% compression, {} compressed to {}):\n{}", (str_len / recv as f32) * 100.0 as f32, recv, str_len, s);
+                    println!("Results ({:.2}% compression, {} compressed to {}):\n{}", (recv as f32 / str_len) * 100.0 as f32, recv, str_len, s);
                     if recv < 4096 {
                         break;
                     }

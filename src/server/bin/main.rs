@@ -2,12 +2,14 @@ extern crate mio;
 extern crate flate2;
 
 
+use std::io::Read;
 use mio::*;
 use mio::net::*;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
+use flate2::bufread::ZlibDecoder;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Write, ErrorKind};
 use std::net::{Ipv4Addr, Shutdown};
 use std::env;
 use std::process::{Stdio, Command, exit};
@@ -86,6 +88,16 @@ fn execute_command(command_split: Vec<&str>) -> Result<String, std::io::Error> {
     Ok(String::from_utf8_lossy(&command_output.stdout).to_string())
 }
 
+fn decompress_buffer(read_buffer: Vec<u8>) -> String {
+    println!("Read buf: {:?}", read_buffer);
+
+    let mut decompressor = ZlibDecoder::new(read_buffer.as_slice());
+    let mut uncompressed_buffer = String::new();
+    decompressor.read_to_string(&mut uncompressed_buffer).unwrap();
+
+    uncompressed_buffer
+}
+
 fn command_loop_server(sockets: &mut ServerConnections, poll: &Poll, mut pevents: &mut Events){
     loop {
         poll.poll(&mut pevents, None).unwrap();
@@ -102,27 +114,36 @@ fn command_loop_server(sockets: &mut ServerConnections, poll: &Poll, mut pevents
                 }
                 token => {
                     println!("Client connection: {:?}", token);
-                    let client = sockets.clients.get(&token).unwrap();
+                    let mut client = sockets.clients.get(&token).unwrap();
                     let mut send_client = client.try_clone().unwrap();
-                    let mut reader = BufReader::new(client);
-                    let mut command = String::new();
-                    let read_buf = match reader.read_line(&mut command){
+                    let mut buffer = [0; 4096];
+
+                    let recv = match client.read(&mut buffer){
                         Ok(r) => r,
                         Err(e) => {
-                            if e.raw_os_error().unwrap() == 104 {
-                                let _ = client.shutdown(Shutdown::Both);
-                                sockets.token_counter -= 1;
-                                let _ = poll.deregister(client);
-                                println!("Connection reset by peer");
-                                break;
-                            } else {
-                                println!("Error reading: {:?}", e);
+                            println!("Error: {:?}", e.to_string());
+
+                            match e.kind() {
+                                ErrorKind::BrokenPipe => {
+                                    let _ = client.shutdown(Shutdown::Both);
+                                    sockets.token_counter -= 1;
+                                    let _ = poll.deregister(client);
+                                    println!("Connection reset by peer");
+                                    break;
+                                }
+                                _ => {
+                                    println!("Error reading: {:?}", e);
+                                }   
                             }
                             continue;
+
                         }
                     };
 
-                    println!("Recv, length {}: {}", read_buf, command);
+                    let mut buffer = buffer.to_vec();
+                    buffer.truncate(recv);
+                    let mut command = decompress_buffer(buffer);
+                    println!("Recv, length {}: {}", recv, command);
 
                     if command.trim() == "kill" {
                         exit(0);
@@ -150,12 +171,11 @@ fn command_loop_server(sockets: &mut ServerConnections, poll: &Poll, mut pevents
                             command_output.unwrap_err().to_string()
                         };
 
-                    let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+                    let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
                     let _compressed_bytes_len = e.write(command_output.as_bytes()).unwrap();
                     let compressed_bytes = e.finish().unwrap();
                     println!("Compressed len: {}", compressed_bytes.len());
                     println!("Orig len: {}", command_output.len());
-                    //println!("Sending: {:?}", compressed_bytes);
                     let _ = send_client.write(&compressed_bytes[..]);
 
                 }
@@ -218,6 +238,7 @@ fn command_loop_client(poll: Poll, mut pevents: Events, client_sock: &TcpStream)
         //println!("Sending: {:?}", compressed_bytes);
         let _ = send_client.write(&compressed_bytes[..]);
     }
+}
 
 fn main () {
     let poll = Poll::new().unwrap();
