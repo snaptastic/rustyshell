@@ -61,7 +61,12 @@ fn parse_options() -> EnvOptions {
     }
 
     let port = match env::var("P") {
-        Ok(r) => r,
+        Ok(r) => {
+            if r < 1 || r > 65535 {
+                
+            }
+            r
+        },
         /* 
          * Add in port number checking here
          */
